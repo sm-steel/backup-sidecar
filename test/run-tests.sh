@@ -87,6 +87,59 @@ if sidecar -v bsc-test_sqlite:/data -e DUMP_KIND=sqlite -e SQLITE_FILES=/data/da
      -e DUMP_MIN_BYTES=100 -e RESTIC_REPOSITORY=$R6 -e RESTIC_HOST=t-sqlite "$IMG" run >/tmp/t6.log 2>&1 \
    && restic_raw $R6 ls latest 2>/dev/null | grep -q '/data/id_ed25519'; then ok T6-sqlite; else no T6-sqlite; cat /tmp/t6.log; fi
 
+tglog() { docker run --rm -v bsc-test_tglog:/log alpine:3.22.6 cat /log/requests.log 2>/dev/null || true; }
+awscli() {
+  docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=testkey -e AWS_SECRET_ACCESS_KEY=testsecret123 \
+    -e AWS_DEFAULT_REGION=us-east-1 amazon/aws-cli:2.27.50 \
+    --endpoint-url http://s3:8333 "$@"
+}
+
+# T7: daily check passes on a fresh repo; with MAX_AGE_SECONDS=1 it fails and alerts, token never printed
+# shellcheck disable=SC2086
+if sidecar -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" check >/tmp/t7a.log 2>&1; then ok T7-daily-ok; else no T7-daily-ok; cat /tmp/t7a.log; fi
+sleep 2
+# shellcheck disable=SC2086
+if sidecar -e MAX_AGE_SECONDS=1 -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" check >/tmp/t7b.log 2>&1; then no T7-stale
+elif tglog | grep -q 'stale'; then ok T7-stale-alerted; else no T7-stale-not-alerted; fi
+if grep -q 'SECRETTOKEN123' /tmp/t*.log; then no T7-token-leaked; else ok T7-token-not-printed; fi
+
+# T8: a killed backup leaves a lock; daily check flags it when LOCK_MAX_AGE_SECONDS=0
+# shellcheck disable=SC2086
+docker run -d --name bsc-kill --network "$NET" --entrypoint sh $S3ENV -e RESTIC_PASSWORD=repo-pass "$IMG" \
+  -c "head -c 200000000 /dev/urandom | restic -r $R1 backup --host t-pg --stdin" >/dev/null
+sleep 4; docker kill -s KILL bsc-kill >/dev/null; docker rm bsc-kill >/dev/null
+# shellcheck disable=SC2086
+if sidecar -e LOCK_MAX_AGE_SECONDS=0 -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" check >/tmp/t8.log 2>&1; then no T8-stale-lock
+elif grep -q 'lock' /tmp/t8.log; then ok T8-stale-lock-flagged; else no T8-stale-lock-wrong-reason; cat /tmp/t8.log; fi
+# The killed process's lock is non-exclusive (backup), so a normal run still
+# succeeds while it exists; T8b proves that. Then clear it the way an operator
+# would (restic can't prove a lock from another container is stale, which is why
+# the daily check reports it instead of the sidecar removing it).
+# shellcheck disable=SC2086
+if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t8b.log 2>&1; then ok T8b-run-despite-lock; else no T8b-run-despite-lock; cat /tmp/t8b.log; fi
+restic_raw "$R1" unlock --remove-all >/dev/null 2>&1
+
+# T9: snapshots from containers with different hostnames all group under RESTIC_HOST; weekly prunes them
+# shellcheck disable=SC2086
+for h in a b c; do sidecar --hostname "rand-$h" $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/dev/null 2>&1; done
+before=$(snapcount "$R1")
+# shellcheck disable=SC2086
+if sidecar -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t9.log 2>&1 \
+   && [ "$before" -ge 5 ] && [ "$(snapcount "$R1")" = 2 ]; then ok T9-weekly-retention; else no "T9-weekly-retention before=$before after=$(snapcount "$R1")"; cat /tmp/t9.log; fi
+
+# T10: an abandoned multipart upload under the prefix is aborted by weekly (MULTIPART_MAX_AGE=0s) and alerted
+awscli s3api create-multipart-upload --bucket bsc --key t/pg/data/zz-orphan >/dev/null
+# shellcheck disable=SC2086
+if sidecar -e MULTIPART_MAX_AGE=0s -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t10.log 2>&1; then no T10-multipart-not-reported
+elif tglog | grep -q 'multipart'; then ok T10-multipart-alerted; else no T10-multipart-no-alert; cat /tmp/t10.log; fi
+# rclone aborts only uploads whose age it can prove; SeaweedFS omits Initiated,
+# so there the abort half can't be exercised (it is proven against Selectel instead).
+initiated=$(awscli s3api list-multipart-uploads --bucket bsc --prefix t/pg/ --query "Uploads[0].Initiated" --output text)
+left=$(awscli s3api list-multipart-uploads --bucket bsc --prefix t/pg/ --query "length(Uploads || \`[]\`)")
+if [ "$left" = 0 ]; then ok T10-multipart-aborted
+elif [ "$initiated" = None ]; then echo "SKIP T10-multipart-aborted (backend reports no Initiated time)"
+else no "T10-multipart-left=$left"; fi
+
 # --- Task 3 appends T7-T10 above this line ---
 
 $C down -v >/dev/null 2>&1
