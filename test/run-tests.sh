@@ -26,6 +26,12 @@ restic_raw() {
   # shellcheck disable=SC2086
   docker run --rm --network "$NET" --entrypoint restic $S3ENV -e RESTIC_PASSWORD=repo-pass "$IMG" -r "$r" "$@"
 }
+# restic_stdin <repo> <backup args...>: a quick snapshot of whatever is piped in.
+restic_stdin() {
+  r=$1; shift
+  # shellcheck disable=SC2086
+  docker run --rm -i --network "$NET" --entrypoint restic $S3ENV -e RESTIC_PASSWORD=repo-pass "$IMG" -r "$r" backup --stdin -q "$@" >/dev/null
+}
 snapcount() { restic_raw "$1" snapshots --json 2>/dev/null | jq length 2>/dev/null || echo 0; }
 
 $C down -v >/dev/null 2>&1 || true
@@ -117,12 +123,18 @@ docker rm -f bsc-kill >/dev/null
 if sidecar -e LOCK_MAX_AGE_SECONDS=0 -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" check >/tmp/t8.log 2>&1; then no T8-stale-lock
 elif grep -q 'lock' /tmp/t8.log; then ok T8-stale-lock-flagged; else no T8-stale-lock-wrong-reason; cat /tmp/t8.log; fi
 # The killed process's lock is non-exclusive (backup), so a normal run still
-# succeeds while it exists; T8b proves that. Then clear it the way an operator
-# would (restic can't prove a lock from another container is stale, which is why
-# the daily check reports it instead of the sidecar removing it).
+# succeeds while it exists; T8b proves that.
 # shellcheck disable=SC2086
 if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t8b.log 2>&1; then ok T8b-run-despite-lock; else no T8b-run-despite-lock; cat /tmp/t8b.log; fi
-restic_raw "$R1" unlock --remove-all >/dev/null 2>&1
+# T8c: the same lock would block weekly's exclusive forget/prune forever (restic
+# can't prove a lock from another container is stale). weekly removes locks older
+# than LOCK_MAX_AGE_SECONDS itself, alerts about it, and then prunes.
+# shellcheck disable=SC2086
+if sidecar -e LOCK_MAX_AGE_SECONDS=0 -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t8c.log 2>&1; then no T8c-stale-lock-not-reported
+elif ! tglog | grep -q 'removed.stale.lock'; then no T8c-no-removal-alert; cat /tmp/t8c.log
+elif [ -n "$(restic_raw "$R1" list locks --no-lock 2>/dev/null)" ]; then no T8c-lock-still-there
+elif grep -q 'forget/prune failed' /tmp/t8c.log; then no T8c-prune-still-blocked; cat /tmp/t8c.log
+else ok T8c-weekly-clears-stale-lock; fi
 
 # T9: snapshots from containers with different hostnames all group under RESTIC_HOST; weekly prunes them
 # shellcheck disable=SC2086
@@ -144,6 +156,30 @@ left=$(awscli s3api list-multipart-uploads --bucket bsc --prefix t/pg/ --query "
 if [ "$left" = 0 ]; then ok T10-multipart-aborted
 elif [ "$initiated" = None ]; then echo "SKIP T10-multipart-aborted (backend reports no Initiated time)"
 else no "T10-multipart-left=$left"; fi
+
+# T11: the snapshot ceiling follows retention (KEEP_* sum + 8), so a full week of
+# nightlies before the Sunday prune never trips it; 1/1/1 -> limit 11.
+R11="$REPO_BASE/t/many"
+KEEP111="-e KEEP_DAILY=1 -e KEEP_WEEKLY=1 -e KEEP_MONTHLY=1"
+restic_raw "$R11" init >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10 11; do echo "$i" | restic_stdin "$R11" --host t-many; done
+# shellcheck disable=SC2086
+if sidecar $KEEP111 -e RESTIC_REPOSITORY=$R11 -e RESTIC_HOST=t-many "$IMG" check >/tmp/t11a.log 2>&1; then ok T11-ceiling-11-ok; else no T11-ceiling-11-ok; cat /tmp/t11a.log; fi
+echo 12 | restic_stdin "$R11" --host t-many
+# shellcheck disable=SC2086
+if sidecar $KEEP111 -e RESTIC_REPOSITORY=$R11 -e RESTIC_HOST=t-many "$IMG" check >/tmp/t11b.log 2>&1; then no T11-ceiling-12-not-flagged
+elif grep -q 'exceeds 11' /tmp/t11b.log; then ok T11-ceiling-12-flagged; else no T11-ceiling-wrong-reason; cat /tmp/t11b.log; fi
+
+# T12: schedule mode (supercronic) really runs the backup with the container's env
+R12="$REPO_BASE/t/sched"
+# shellcheck disable=SC2086
+docker run -d --name bsc-sched --network "$NET" --tmpfs /run/backup --tmpfs /var/tmp $S3ENV -e RESTIC_PASSWORD=repo-pass \
+  -e DUMP_KIND=none -e EXTRA_PATHS=/etc/hostname -e SCHEDULE="* * * * *" \
+  -e RESTIC_REPOSITORY=$R12 -e RESTIC_HOST=t-sched "$IMG" >/dev/null
+i=0; until [ "$(snapcount "$R12")" -ge 1 ] || [ "$i" -ge 12 ]; do i=$((i+1)); sleep 10; done
+if [ "$(snapcount "$R12")" -ge 1 ] && docker exec bsc-sched test -f /run/backup/last-success; then ok T12-scheduled-run
+else no T12-scheduled-run; docker logs bsc-sched 2>&1 | tail -10; fi
+docker rm -f bsc-sched >/dev/null
 
 # --- Task 3 appends T7-T10 above this line ---
 

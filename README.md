@@ -11,7 +11,7 @@ runs it as a `backup` service in its compose stack, pinned to an exact tag.
 | `schedule` (default) | runs `run` on `SCHEDULE` under supercronic; optional `RUN_ON_START` | on the host, in the deployer's compose |
 | `run` | dump → size floor → `restic backup --tag nightly`, init on first use | host (one-off: `docker compose run --rm backup run`) |
 | `check` | daily: newest snapshot age, snapshot count, stale locks | the deployer's CI, with the **prune** user |
-| `weekly` | `forget` 7d/4w/6m `--prune`, `check --read-data-subset`, multipart sweep, then the daily checks | the deployer's CI, with the **prune** user |
+| `weekly` | removes locks older than `LOCK_MAX_AGE_SECONDS` (left by killed runs), then `forget` 7d/4w/6m `--prune`, `check --read-data-subset`, multipart sweep, then the daily checks | the deployer's CI, with the **prune** user |
 | `healthcheck` | Docker `HEALTHCHECK`: unhealthy once the last success (or start) is older than `MAX_AGE_SECONDS` | host |
 
 `run` never forgets, prunes, unlocks or deletes anything. The host's write-only
@@ -42,8 +42,8 @@ rather than riding restic's ~15-minute retry loop.
 | `TELEGRAM_BOT_URL` | — | full `sendMessage?chat_id=…` URL; never logged |
 | `PROBE_TIMEOUT_SECONDS` | `120` | cap on the "does the repository exist" probe |
 | `MAX_AGE_SECONDS` | `93600` | healthcheck and daily freshness threshold (26 h) |
-| `MAX_SNAPSHOTS` | `20` | daily: more than this means retention isn't running |
-| `LOCK_MAX_AGE_SECONDS` | `86400` | daily: older locks are reported (never removed) |
+| `MAX_SNAPSHOTS` | `KEEP_DAILY+KEEP_WEEKLY+KEEP_MONTHLY+8` (25) | daily: more than this means retention isn't running (the +8 covers a week of nightlies before the weekly prune) |
+| `LOCK_MAX_AGE_SECONDS` | `86400` | daily: older locks are reported; weekly removes them (alerting) so a killed run can't block retention |
 | `KEEP_DAILY` / `KEEP_WEEKLY` / `KEEP_MONTHLY` | `7` / `4` / `6` | weekly retention |
 | `READ_SUBSET` | `250M` | weekly `restic check --read-data-subset` |
 | `MULTIPART_MAX_AGE` | `72h` | weekly: abort abandoned multipart uploads older than this (younger ones are reported only) |
