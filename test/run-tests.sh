@@ -119,6 +119,7 @@ until [ -n "$(restic_raw "$R1" list locks --no-lock 2>/dev/null)" ]; do
   i=$((i+1)); [ "$i" -lt 30 ] || break; sleep 1
 done
 docker rm -f bsc-kill >/dev/null
+sleep 2  # the checks below need the lock to be older than LOCK_MAX_AGE_SECONDS=0
 # shellcheck disable=SC2086
 if sidecar -e LOCK_MAX_AGE_SECONDS=0 -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" check >/tmp/t8.log 2>&1; then no T8-stale-lock
 elif grep -q 'lock' /tmp/t8.log; then ok T8-stale-lock-flagged; else no T8-stale-lock-wrong-reason; cat /tmp/t8.log; fi
