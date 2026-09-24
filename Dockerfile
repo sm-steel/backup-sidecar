@@ -21,8 +21,8 @@ RUN apk add --no-cache ca-certificates curl jq tzdata \
  && unzip -q rclone.zip && install -m 0755 "rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone \
  && rm -rf /tmp/*
 
-COPY lib/common.sh /usr/local/lib/backup/common.sh
-COPY bin/entrypoint.sh bin/backup.sh bin/check.sh /usr/local/bin/
+COPY --chmod=0644 lib/common.sh /usr/local/lib/backup/common.sh
+COPY --chmod=0755 bin/entrypoint.sh bin/backup.sh bin/check.sh /usr/local/bin/
 
 # Unhealthy if the last successful backup (or container start, before the
 # first one) is older than MAX_AGE_SECONDS (default 26 h).

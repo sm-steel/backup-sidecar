@@ -1,0 +1,25 @@
+# Integration fixture. S3 is SeaweedFS (MinIO's community images are no
+# longer on Docker Hub). It rejects signed requests unless an identity is
+# configured, so seaweed-s3.json defines the test key. Bucket policies are
+# verified live against Selectel, not here.
+name: bsc-test
+services:
+  s3:
+    image: chrislusf/seaweedfs@sha256:bb05d66d2963b1cc48073190781c3dd29e2c4c88a2ae2986bf58e38c86d89c6e
+    command: server -dir=/data -s3 -s3.port=8333 -s3.config=/s3.json
+    volumes: [./seaweed-s3.json:/s3.json:ro]
+  postgres:
+    image: postgres:16.15-alpine
+    environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: pgpass, POSTGRES_DB: app}
+    volumes: [./seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro]
+  mariadb:
+    image: mariadb:11.8.8
+    environment: {MARIADB_ROOT_PASSWORD: rootpass, MARIADB_DATABASE: app, MARIADB_USER: app, MARIADB_PASSWORD: mdbpass}
+    volumes: [./seed/mariadb.sql:/docker-entrypoint-initdb.d/seed.sql:ro]
+  tg:
+    image: python:3.12-alpine
+    command: ["python", "/tg-mock.py"]
+    volumes: [./tg-mock.py:/tg-mock.py:ro, tglog:/log]
+volumes:
+  tglog:
+  sqlite:
