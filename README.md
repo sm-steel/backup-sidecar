@@ -1,10 +1,8 @@
 # backup-sidecar
 
-A shared image, `ghcr.io/sm-steel/backup-sidecar:<version>`, that backs up one
-service's database into its own restic repository on S3. Each deployer repo on
-the smsteel fleet runs it as a `backup` service in its compose stack, pinned to
-an exact tag. Design: `priv-vps-infrastructure`,
-`docs/superpowers/specs/2026-09-24-per-deployer-backups-design.md`.
+A shared image, `ghcr.io/<owner>/backup-sidecar:<version>`, that backs up one
+service's database into its own restic repository on S3. Each deployer repo
+runs it as a `backup` service in its compose stack, pinned to an exact tag.
 
 ## Modes
 
@@ -37,7 +35,7 @@ rather than riding restic's ~15-minute retry loop.
 | `DUMP_MIN_BYTES` | `1024` | per-dump size floor; a smaller dump fails the run |
 | `SCHEDULE` | — | cron expression for `schedule` mode |
 | `RUN_ON_START` | `false` | `true` runs one backup at start-up (first deploy only) |
-| `RESTIC_REPOSITORY` | — | `s3:https://s3.ru-6.storage.selcloud.ru/smsteel-backup-1/<host>/<service>` |
+| `RESTIC_REPOSITORY` | — | `s3:https://s3.example.com/my-backups/<host>/<service>` |
 | `RESTIC_PASSWORD` | — | moved into a tmpfs file (`RESTIC_PASSWORD_FILE`) and unset from the environment |
 | `RESTIC_HOST` | — | pinned group key `<host>-<service>`, passed as `--host` |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | — | write user on the host; prune user in CI |
@@ -49,7 +47,7 @@ rather than riding restic's ~15-minute retry loop.
 | `KEEP_DAILY` / `KEEP_WEEKLY` / `KEEP_MONTHLY` | `7` / `4` / `6` | weekly retention |
 | `READ_SUBSET` | `250M` | weekly `restic check --read-data-subset` |
 | `MULTIPART_MAX_AGE` | `72h` | weekly: abort abandoned multipart uploads older than this (younger ones are reported only) |
-| `S3_REGION` | `us-east-1` | region for rclone's multipart sweep (`ru-6` on Selectel) |
+| `S3_REGION` | `us-east-1` | region for rclone's multipart sweep (your provider's region) |
 
 Mount `/run/backup` and `/var/tmp` as tmpfs: state and dumps never touch disk.
 
@@ -57,9 +55,9 @@ Mount `/run/backup` and `/var/tmp` as tmpfs: state and dumps never touch disk.
 
 ```yaml
   backup:
-    image: ghcr.io/sm-steel/backup-sidecar:${BACKUP_SIDECAR_VERSION:-0.1.0}
+    image: ghcr.io/<owner>/backup-sidecar:${BACKUP_SIDECAR_VERSION:-0.1.0}
     container_name: keycloak-backup
-    hostname: moscow-keycloak-backup
+    hostname: myhost-keycloak-backup
     restart: unless-stopped
     environment:
       DUMP_KIND: postgres
@@ -68,8 +66,8 @@ Mount `/run/backup` and `/var/tmp` as tmpfs: state and dumps never touch disk.
       DB_PASSWORD: ${DB_PASSWORD}
       DUMP_MIN_BYTES: "1000000"
       SCHEDULE: "0 1 * * *"
-      RESTIC_REPOSITORY: s3:https://s3.ru-6.storage.selcloud.ru/smsteel-backup-1/moscow/keycloak
-      RESTIC_HOST: moscow-keycloak
+      RESTIC_REPOSITORY: s3:https://s3.example.com/my-backups/myhost/keycloak
+      RESTIC_HOST: myhost-keycloak
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}
       AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY}
@@ -85,14 +83,14 @@ Mount `/run/backup` and `/var/tmp` as tmpfs: state and dumps never touch disk.
 
 Restores run from an operator machine with the service's **prune** user, which
 can read. Never use the host's write user. Password #1 is in the deployer's
-SOPS; password #2 (a second key on the same repository) is in the vault.
+SOPS; password #2 (a second key on the same repository) is kept offline.
 
 ```sh
 export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…   # prune user
-export RESTIC_REPOSITORY=s3:https://s3.ru-6.storage.selcloud.ru/smsteel-backup-1/moscow/keycloak
-restic snapshots --host moscow-keycloak
-restic restore latest --host moscow-keycloak --target ./restore
-restic dump latest --host moscow-keycloak /var/tmp/dump/pg_dumpall.sql > pg_dumpall.sql
+export RESTIC_REPOSITORY=s3:https://s3.example.com/my-backups/myhost/keycloak
+restic snapshots --host myhost-keycloak
+restic restore latest --host myhost-keycloak --target ./restore
+restic dump latest --host myhost-keycloak /var/tmp/dump/pg_dumpall.sql > pg_dumpall.sql
 ```
 
 Dumps sit under `/var/tmp/dump/` in the snapshot: `pg_dumpall.sql`,
@@ -111,7 +109,7 @@ original paths.
 
 To bump: change the ARG and its checksum together, taken from the upstream
 release's checksum file (never computed from a download you just made), run
-the tests, then tag `vX.Y.Z`. CI publishes `ghcr.io/sm-steel/backup-sidecar:X.Y.Z`.
+the tests, then tag `vX.Y.Z`. CI publishes `ghcr.io/<owner>/backup-sidecar:X.Y.Z`.
 Deployers move to it in their own PR.
 
 ## Tests
@@ -120,4 +118,4 @@ Deployers move to it in their own PR.
 integration suite: SeaweedFS as S3, postgres, mariadb, sqlite, and a mock
 Telegram endpoint. SeaweedFS doesn't report multipart `Initiated` times, so
 the "abandoned upload is aborted" half of T10 prints `SKIP` there; it is
-proven against Selectel.
+verified against a real S3 provider.

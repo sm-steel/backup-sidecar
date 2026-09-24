@@ -38,4 +38,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/sm-steel/backup-sidecar:${{ steps.ver.outputs.ver }}
+          tags: ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.ver }}

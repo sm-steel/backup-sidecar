@@ -138,7 +138,7 @@ awscli s3api create-multipart-upload --bucket bsc --key t/pg/data/zz-orphan >/de
 if sidecar -e MULTIPART_MAX_AGE=0s -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t10.log 2>&1; then no T10-multipart-not-reported
 elif tglog | grep -q 'multipart'; then ok T10-multipart-alerted; else no T10-multipart-no-alert; cat /tmp/t10.log; fi
 # rclone aborts only uploads whose age it can prove; SeaweedFS omits Initiated,
-# so there the abort half can't be exercised (it is proven against Selectel instead).
+# so there the abort half can't be exercised (it is verified against a real S3 provider instead).
 initiated=$(awscli s3api list-multipart-uploads --bucket bsc --prefix t/pg/ --query "Uploads[0].Initiated" --output text)
 left=$(awscli s3api list-multipart-uploads --bucket bsc --prefix t/pg/ --query "length(Uploads || \`[]\`)")
 if [ "$left" = 0 ]; then ok T10-multipart-aborted

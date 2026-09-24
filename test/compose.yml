@@ -1,7 +1,7 @@
 # Integration fixture. S3 is SeaweedFS (MinIO's community images are no
 # longer on Docker Hub). It rejects signed requests unless an identity is
 # configured, so seaweed-s3.json defines the test key. Bucket policies are
-# verified live against Selectel, not here.
+# verified against a real S3 provider, not here.
 name: bsc-test
 services:
   s3:
