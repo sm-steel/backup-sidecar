@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+# shellcheck source=lib/common.sh
 . /usr/local/lib/backup/common.sh
 
 mode=${1:-schedule}

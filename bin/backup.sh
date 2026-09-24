@@ -2,6 +2,7 @@
 # run: dump -> size floor -> restic backup. Exit 0 only after a snapshot
 # was written; any failure leaves no new snapshot and no last-success.
 set -eu
+# shellcheck source=lib/common.sh
 . /usr/local/lib/backup/common.sh
 restic_setup
 require_env DUMP_KIND
@@ -15,7 +16,9 @@ trap 'rm -rf "$DUMP_DIR"' EXIT
 # DNS, TLS and permission failures inside the same "unable to open config
 # file" wording as a missing repository, so those markers are checked first:
 # initialising over an existing-but-unreachable repository must never happen.
-if ! out=$(restic cat config 2>&1 >/dev/null); then
+# restic retries an unreachable backend for ~15 min; the probe is capped so a
+# dead endpoint fails fast (a timed-out probe falls through to "not initialising").
+if ! out=$(timeout "${PROBE_TIMEOUT_SECONDS:-120}" restic cat config 2>&1 >/dev/null); then
   case "$out" in
     *"no such host"*|*"dial tcp"*|*"connection refused"*|*"i/o timeout"*|*"TLS handshake"*|*"x509"*|*"AccessDenied"*|*"Access Denied"*|*"Forbidden"*|*"SignatureDoesNotMatch"*|*"InvalidAccessKeyId"*)
       fail "cannot reach repository (not initialising): $(printf '%s' "$out" | tail -c 300)" ;;

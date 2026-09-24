@@ -29,6 +29,7 @@ restic_raw() {
 snapcount() { restic_raw "$1" snapshots --json 2>/dev/null | jq length 2>/dev/null || echo 0; }
 
 $C down -v >/dev/null 2>&1 || true
+docker volume rm -f bsc-test_sqlite >/dev/null 2>&1 || true  # used only by docker run, so compose never removes it
 $C up -d >/dev/null
 i=0
 until docker run --rm --network "$NET" --entrypoint rclone -e RCLONE_CONFIG_M_TYPE=s3 \
@@ -47,8 +48,9 @@ R1="$REPO_BASE/t/pg"
 if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t1.log 2>&1 \
    && [ "$(snapcount $R1)" = 1 ]; then ok T1-first-run; else no T1-first-run; cat /tmp/t1.log; fi
 dump=$(restic_raw $R1 dump latest /var/tmp/dump/pg_dumpall.sql 2>/dev/null || true)
-if echo "$dump" | grep -q 'backup-sidecar-postgres-marker' && echo "$dump" | grep -q 'extra_role'; then
-  ok T1-dump-content; else no T1-dump-content; echo "--- dump head:"; echo "$dump" | head -20; restic_raw $R1 ls latest 2>&1 | tail -5; fi
+# printf, not echo: dash's echo treats pg_dumpall's "\connect" as "\c" (stop output)
+if printf '%s\n' "$dump" | grep -q 'backup-sidecar-postgres-marker' && printf '%s\n' "$dump" | grep -q 'extra_role'; then
+  ok T1-dump-content; else no T1-dump-content; echo "--- dump head:"; printf '%s\n' "$dump" | head -20; restic_raw $R1 ls latest 2>&1 | tail -5; fi
 
 # T2: second run -> no re-init, 2 snapshots
 # shellcheck disable=SC2086
@@ -57,7 +59,7 @@ if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t2.
 
 # T2b: unreachable endpoint -> non-zero, and it must NOT try to init (review focus #5)
 # shellcheck disable=SC2086
-if sidecar $PG -e RESTIC_REPOSITORY=s3:http://no-such-host:9000/bsc/t/pg -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t2b.log 2>&1; then no T2b-unreachable
+if sidecar $PG -e PROBE_TIMEOUT_SECONDS=20 -e RESTIC_REPOSITORY=s3:http://no-such-host:9000/bsc/t/pg -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t2b.log 2>&1; then no T2b-unreachable
 elif grep -q 'not initialising' /tmp/t2b.log && ! grep -q 'no repository yet' /tmp/t2b.log; then ok T2b-unreachable-no-init; else no T2b-wrong-path; cat /tmp/t2b.log; fi
 
 # T3: wrong DB password -> non-zero, no new snapshot (review focus #1)
@@ -88,5 +90,6 @@ if sidecar -v bsc-test_sqlite:/data -e DUMP_KIND=sqlite -e SQLITE_FILES=/data/da
 # --- Task 3 appends T7-T10 above this line ---
 
 $C down -v >/dev/null 2>&1
+docker volume rm -f bsc-test_sqlite >/dev/null 2>&1 || true
 echo "passed=$pass failed=$failn"
 [ "$failn" = 0 ]

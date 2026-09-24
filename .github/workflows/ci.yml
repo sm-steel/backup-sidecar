@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: shellcheck
-        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 -s sh bin/entrypoint.sh bin/backup.sh bin/check.sh lib/common.sh test/run-tests.sh
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 -x -s sh bin/entrypoint.sh bin/backup.sh bin/check.sh lib/common.sh test/run-tests.sh
       - name: build
         run: docker build -t backup-sidecar:test .
       - name: integration tests
