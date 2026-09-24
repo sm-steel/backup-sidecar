@@ -106,8 +106,13 @@ if grep -q 'SECRETTOKEN123' /tmp/t*.log; then no T7-token-leaked; else ok T7-tok
 # T8: a killed backup leaves a lock; daily check flags it when LOCK_MAX_AGE_SECONDS=0
 # shellcheck disable=SC2086
 docker run -d --name bsc-kill --network "$NET" --entrypoint sh $S3ENV -e RESTIC_PASSWORD=repo-pass "$IMG" \
-  -c "head -c 200000000 /dev/urandom | restic -r $R1 backup --host t-pg --stdin" >/dev/null
-sleep 4; docker kill -s KILL bsc-kill >/dev/null; docker rm bsc-kill >/dev/null
+  -c "restic -r $R1 backup --host t-pg --stdin </dev/urandom" >/dev/null
+# endless input, so the backup can't finish first; kill once its lock is visible
+i=0
+until [ -n "$(restic_raw "$R1" list locks --no-lock 2>/dev/null)" ]; do
+  i=$((i+1)); [ "$i" -lt 30 ] || break; sleep 1
+done
+docker rm -f bsc-kill >/dev/null
 # shellcheck disable=SC2086
 if sidecar -e LOCK_MAX_AGE_SECONDS=0 -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" check >/tmp/t8.log 2>&1; then no T8-stale-lock
 elif grep -q 'lock' /tmp/t8.log; then ok T8-stale-lock-flagged; else no T8-stale-lock-wrong-reason; cat /tmp/t8.log; fi
