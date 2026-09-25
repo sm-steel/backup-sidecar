@@ -11,7 +11,7 @@ runs it as a `backup` service in its compose stack, pinned to an exact tag.
 | `schedule` (default) | runs `run` on `SCHEDULE` under supercronic; optional `RUN_ON_START` | on the host, in the deployer's compose |
 | `run` | dump → size floor → `restic backup --tag nightly`, init on first use | host (one-off: `docker compose run --rm backup run`) |
 | `check` | daily: newest snapshot age, snapshot count, stale locks | the deployer's CI, with the **prune** user |
-| `weekly` | removes locks older than `LOCK_MAX_AGE_SECONDS` (left by killed runs), then `forget` 7d/4w/6m `--prune`, `check --read-data-subset`, multipart sweep, then the daily checks | the deployer's CI, with the **prune** user |
+| `weekly` | removes locks older than `LOCK_MAX_AGE_SECONDS` (left by killed runs), then `forget --group-by host` 7d/4w/6m `--prune`, `check --read-data-subset`, multipart sweep of `<prefix>/` (a failed listing alerts), then the daily checks | the deployer's CI, with the **prune** user |
 | `healthcheck` | Docker `HEALTHCHECK`: unhealthy once the last success (or start) is older than `MAX_AGE_SECONDS` | host |
 
 `run` never forgets, prunes, unlocks or deletes anything. The host's write-only
@@ -30,13 +30,14 @@ rather than riding restic's ~15-minute retry loop.
 | `DUMP_KIND` | — | `postgres`, `mariadb`, `sqlite` or `none` |
 | `DB_HOST`, `DB_USER`, `DB_PASSWORD` | — | connection (postgres/mariadb); service names on the compose network |
 | `DB_NAME` | — | database to dump (mariadb; postgres uses `pg_dumpall`) |
-| `SQLITE_FILES` | — | space-separated database paths, copied with `.backup` (sqlite) |
+| `SQLITE_FILES` | — | space-separated database paths, copied with `.backup` and checked with `PRAGMA integrity_check` (sqlite). `path:min_bytes` sets a per-file floor. Basenames must be unique and use only letters, digits, `.`, `_`, `-`; a missing file fails the run (it is never created). No spaces in paths. |
+| `SQLITE_CHECK` | — | optional `basename:SQL` run on the copy; must return a number ≥ 1 (e.g. `data.db:select count(*) from systems`) |
 | `EXTRA_PATHS` | — | files/directories included as-is (mount them read-only) |
 | `DUMP_MIN_BYTES` | `1024` | per-dump size floor; a smaller dump fails the run |
 | `SCHEDULE` | — | cron expression for `schedule` mode |
 | `RUN_ON_START` | `false` | `true` runs one backup at start-up (first deploy only) |
 | `RESTIC_REPOSITORY` | — | `s3:https://s3.example.com/my-backups/<host>/<service>` |
-| `RESTIC_PASSWORD` | — | moved into a tmpfs file (`RESTIC_PASSWORD_FILE`) and unset from the environment |
+| `RESTIC_PASSWORD` | — | written to a tmpfs file (`RESTIC_PASSWORD_FILE`) and unset for restic and the dump tools. It still sits in the container's config (`docker inspect`), like every env value |
 | `RESTIC_HOST` | — | pinned group key `<host>-<service>`, passed as `--host` |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | — | write user on the host; prune user in CI |
 | `TELEGRAM_BOT_URL` | — | full `sendMessage?chat_id=…` URL; never logged |
@@ -55,23 +56,25 @@ Mount `/run/backup` and `/var/tmp` as tmpfs: state and dumps never touch disk.
 
 ```yaml
   backup:
-    image: ghcr.io/<owner>/backup-sidecar:${BACKUP_SIDECAR_VERSION:-0.1.0}
+    image: ghcr.io/<owner>/backup-sidecar:<version>@sha256:<digest>
     container_name: keycloak-backup
     hostname: myhost-keycloak-backup
     restart: unless-stopped
+    # RESTIC_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY: a separate env
+    # file only this service loads, so the backup keys never reach the app
+    # containers through a shared .env.
+    env_file: backup.env
     environment:
       DUMP_KIND: postgres
       DB_HOST: keycloak-db
       DB_USER: keycloak
       DB_PASSWORD: ${DB_PASSWORD}
-      DUMP_MIN_BYTES: "1000000"
+      # Measure the live dump first and use roughly a quarter of it: a failed
+      # dump is far smaller, and a guessed round number can refuse a healthy one.
+      DUMP_MIN_BYTES: "100000"
       SCHEDULE: "0 1 * * *"
       RESTIC_REPOSITORY: s3:https://s3.example.com/my-backups/myhost/keycloak
       RESTIC_HOST: myhost-keycloak
-      RESTIC_PASSWORD: ${RESTIC_PASSWORD}
-      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY}
-      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY}
-      RUN_ON_START: ${BACKUP_RUN_ON_START:-false}
     tmpfs:
       - /run/backup
       - /var/tmp

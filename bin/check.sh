@@ -71,13 +71,24 @@ weekly() {
     fi
   done < "$STATE_DIR/locks"
 
-  restic forget --host "$RESTIC_HOST" --retry-lock 10m --prune \
+  # --group-by host: one repository holds one service, so every snapshot of
+  # RESTIC_HOST is one group even if its paths change (restic's default,
+  # host+paths, would keep a stranded old-path group forever).
+  restic forget --host "$RESTIC_HOST" --group-by host --retry-lock 10m --prune \
     --keep-daily "${KEEP_DAILY:-7}" --keep-weekly "${KEEP_WEEKLY:-4}" --keep-monthly "${KEEP_MONTHLY:-6}" \
     || problem "forget/prune failed"
   restic check --retry-lock 10m --read-data-subset="${READ_SUBSET:-250M}" || problem "restic check failed"
 
-  # Multipart sweep, own prefix only.
-  found=$(rclone backend list-multipart-uploads "b:$path" 2>/dev/null | jq '[.[] | length] | add // 0' 2>/dev/null || echo 0)
+  # Multipart sweep, own prefix only: "<prefix>/", so a sibling service whose
+  # name starts with ours (keycloak vs keycloak-x) is never counted. A listing
+  # that fails or can't be parsed is a problem, never "0 found".
+  keyprefix="${path#*/}/"
+  if ! mp=$(rclone backend list-multipart-uploads "b:$path/" 2>/dev/null); then
+    problem "cannot list multipart uploads under $keyprefix"; found=0
+  elif ! found=$(printf '%s' "$mp" | jq --arg p "$keyprefix" '[.[][]? | select(.Key | startswith($p))] | length' 2>/dev/null) \
+       || [ -z "$found" ]; then
+    problem "cannot parse the multipart listing under $keyprefix"; found=0
+  fi
   if [ "$found" -gt 0 ]; then
     rclone backend cleanup "b:$path" -o max-age="${MULTIPART_MAX_AGE:-72h}" >/dev/null 2>&1 \
       || problem "multipart cleanup failed"

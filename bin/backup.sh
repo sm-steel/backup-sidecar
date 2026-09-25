@@ -39,18 +39,48 @@ case "$DUMP_KIND" in
       --single-transaction --routines --triggers --events "$DB_NAME" > "$DUMP_DIR/$DB_NAME.sql" \
       || fail "mariadb-dump failed" ;;
   sqlite)
+    # SQLITE_FILES: space-separated "path" or "path:min_bytes" (a per-file
+    # floor; DUMP_MIN_BYTES otherwise). Each copy is named after the file's
+    # basename, so basenames must be unique and plain.
     require_env SQLITE_FILES
-    for f in $SQLITE_FILES; do
-      sqlite3 "$f" ".backup '$DUMP_DIR/$(basename "$f")'" || fail "sqlite .backup of $(basename "$f") failed"
-    done ;;
+    for entry in $SQLITE_FILES; do
+      f=$entry
+      case "$entry" in
+        *:*[!0-9]*|*:) ;;                  # colon not followed by digits only: part of the path
+        *:*) f=${entry%:*}; FLOORS="${FLOORS:-} $(basename "$f")=${entry##*:}" ;;
+      esac
+      name=$(basename "$f")
+      case "$name" in
+        *[!A-Za-z0-9._-]*) fail "sqlite file name $name: only letters, digits, . _ - are supported" ;;
+      esac
+      [ ! -e "$DUMP_DIR/$name" ] || fail "two sqlite files are named $name: basenames must be unique"
+      # sqlite3 would silently create a missing file (on a read-write mount).
+      [ -f "$f" ] || fail "sqlite file $f does not exist"
+      sqlite3 "$f" ".backup '$DUMP_DIR/$name'" || fail "sqlite .backup of $name failed"
+      [ "$(sqlite3 "$DUMP_DIR/$name" 'PRAGMA integrity_check')" = ok ] || fail "sqlite copy of $name fails integrity_check"
+    done
+    # SQLITE_CHECK: "basename:SQL"; the query runs on the copy and must return >= 1.
+    if [ -n "${SQLITE_CHECK:-}" ]; then
+      cname=${SQLITE_CHECK%%:*}; csql=${SQLITE_CHECK#*:}
+      [ -f "$DUMP_DIR/$cname" ] || fail "SQLITE_CHECK names $cname, which is not in SQLITE_FILES"
+      got=$(sqlite3 "$DUMP_DIR/$cname" "$csql" 2>&1) || fail "sanity check on $cname failed to run: $got"
+      case "$got" in ''|*[!0-9]*) fail "sanity check on $cname returned '$got', not a number" ;; esac
+      [ "$got" -ge 1 ] || fail "sanity check on $cname returned $got (< 1): refusing to back it up"
+    fi ;;
   none) ;;
   *) fail "unknown DUMP_KIND=$DUMP_KIND" ;;
 esac
 
+floor_for() { # per-file floor from SQLITE_FILES, else DUMP_MIN_BYTES
+  for pair in ${FLOORS:-}; do
+    case "$pair" in "$1="*) echo "${pair#*=}"; return ;; esac
+  done
+  echo "$MIN"
+}
 for f in "$DUMP_DIR"/*; do
   [ -e "$f" ] || continue
-  size=$(wc -c < "$f")
-  [ "$size" -ge "$MIN" ] || fail "dump $(basename "$f") is $size bytes (< $MIN): refusing to back it up"
+  size=$(wc -c < "$f"); floor=$(floor_for "$(basename "$f")")
+  [ "$size" -ge "$floor" ] || fail "dump $(basename "$f") is $size bytes (< $floor): refusing to back it up"
 done
 
 # shellcheck disable=SC2086 # EXTRA_PATHS is intentionally word-split

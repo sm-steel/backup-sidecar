@@ -93,6 +93,32 @@ if sidecar -v bsc-test_sqlite:/data -e DUMP_KIND=sqlite -e SQLITE_FILES=/data/da
      -e DUMP_MIN_BYTES=100 -e RESTIC_REPOSITORY=$R6 -e RESTIC_HOST=t-sqlite "$IMG" run >/tmp/t6.log 2>&1 \
    && restic_raw $R6 ls latest 2>/dev/null | grep -q '/data/id_ed25519'; then ok T6-sqlite; else no T6-sqlite; cat /tmp/t6.log; fi
 
+# T6b-T6g: sqlite input edge cases. Each failing case must leave no new snapshot.
+docker run --rm -v bsc-test_sqlite:/data --entrypoint sh "$IMG" -c \
+  "mkdir -p /data/a /data/b && for f in /data/a/x.db /data/b/x.db \"/data/it's.db\"; do sqlite3 \"\$f\" 'CREATE TABLE t(x); INSERT INTO t VALUES (1);'; done" >/dev/null
+# sq6 <SQLITE_FILES> [docker args...]: one sqlite run against R6, log in /tmp/t6x.log
+sq6() {
+  files=$1; shift
+  sidecar -v bsc-test_sqlite:/data -e DUMP_KIND=sqlite -e "SQLITE_FILES=$files" -e DUMP_MIN_BYTES=100 \
+    -e "RESTIC_REPOSITORY=$R6" -e RESTIC_HOST=t-sqlite "$@" "$IMG" run >/tmp/t6x.log 2>&1
+}
+n6=$(snapcount "$R6")
+# missing file: fail, and sqlite3 must not create it on the (read-write) mount
+if sq6 /data/nope.db; then no T6b-missing-file-accepted
+elif docker run --rm -v bsc-test_sqlite:/data --entrypoint sh "$IMG" -c 'test -e /data/nope.db'; then no T6b-missing-file-created
+else ok T6b-missing-file; fi
+if sq6 "/data/a/x.db /data/b/x.db"; then no T6c-duplicate-name-accepted; else ok T6c-duplicate-name; fi
+if sq6 "/data/it's.db"; then no T6d-unsafe-name-accepted; else ok T6d-unsafe-name; fi
+# per-file floor: data.db is a few KB, so a 999999999 floor on it alone must fail
+if sq6 "/data/data.db:999999999 /data/a/x.db"; then no T6e-per-file-floor-ignored
+elif grep -q 'data.db is' /tmp/t6x.log; then ok T6e-per-file-floor; else no T6e-per-file-floor-wrong-reason; cat /tmp/t6x.log; fi
+# sanity query: must return >= 1 on the copy
+if sq6 /data/data.db -e "SQLITE_CHECK=data.db:select count(*) from t where x=0"; then no T6f-check-sql-ignored
+elif grep -q 'sanity check' /tmp/t6x.log; then ok T6f-check-sql-fails; else no T6f-check-sql-wrong-reason; cat /tmp/t6x.log; fi
+if [ "$(snapcount "$R6")" = "$n6" ]; then ok T6-edge-cases-no-snapshot; else no "T6-edge-cases-made-snapshots $n6->$(snapcount "$R6")"; fi
+if sq6 "/data/data.db:100 /data/a/x.db:100" -e "SQLITE_CHECK=data.db:select count(*) from t"; then ok T6g-floors-and-check-pass
+else no T6g-floors-and-check-pass; cat /tmp/t6x.log; fi
+
 tglog() { docker run --rm -v bsc-test_tglog:/log alpine:3.22.6 cat /log/requests.log 2>/dev/null || true; }
 awscli() {
   docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=testkey -e AWS_SECRET_ACCESS_KEY=testsecret123 \
@@ -141,9 +167,28 @@ else ok T8c-weekly-clears-stale-lock; fi
 # shellcheck disable=SC2086
 for h in a b c; do sidecar --hostname "rand-$h" $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/dev/null 2>&1; done
 before=$(snapcount "$R1")
+# An upload under a SIBLING prefix (t/pgsib, which shares the "t/pg" string
+# prefix) is not this repository's business: weekly must not report it.
+awscli s3api create-multipart-upload --bucket bsc --key t/pgsib/data/zz-other >/dev/null
 # shellcheck disable=SC2086
 if sidecar -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t9.log 2>&1 \
    && [ "$before" -ge 5 ] && [ "$(snapcount "$R1")" = 2 ]; then ok T9-weekly-retention; else no "T9-weekly-retention before=$before after=$(snapcount "$R1")"; cat /tmp/t9.log; fi
+if grep -q 'multipart' /tmp/t9.log; then no T9b-sibling-prefix-reported; else ok T9b-sibling-prefix-ignored; fi
+
+# T13: a failing multipart listing is a problem, not "0 found"
+printf '#!/bin/sh\necho "simulated rclone failure" >&2\nexit 1\n' > /tmp/fake-rclone && chmod 755 /tmp/fake-rclone
+# shellcheck disable=SC2086
+if sidecar -v /tmp/fake-rclone:/usr/local/bin/rclone:ro -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t13.log 2>&1; then no T13-listing-failure-ignored
+elif grep -q 'cannot list multipart' /tmp/t13.log; then ok T13-listing-failure-alerted; else no T13-wrong-reason; cat /tmp/t13.log; fi
+
+# T15: retention groups by host only, so snapshots of different path sets under
+# one host are pruned together (a changed EXTRA_PATHS must not strand a group)
+R15="$REPO_BASE/t/grp"
+restic_raw "$R15" init >/dev/null 2>&1
+for p in a b a b; do echo "$p" | restic_stdin "$R15" --host t-grp --stdin-filename "$p.txt"; done
+# shellcheck disable=SC2086
+sidecar -e KEEP_DAILY=1 -e KEEP_WEEKLY=0 -e KEEP_MONTHLY=0 -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R15 -e RESTIC_HOST=t-grp "$IMG" weekly >/tmp/t15.log 2>&1 || true
+if [ "$(snapcount "$R15")" = 1 ]; then ok T15-group-by-host; else no "T15-group-by-host left=$(snapcount "$R15")"; fi
 
 # T10: an abandoned multipart upload under the prefix is aborted by weekly (MULTIPART_MAX_AGE=0s) and alerted
 awscli s3api create-multipart-upload --bucket bsc --key t/pg/data/zz-orphan >/dev/null
