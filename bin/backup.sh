@@ -71,6 +71,28 @@ case "$DUMP_KIND" in
   *) fail "unknown DUMP_KIND=$DUMP_KIND" ;;
 esac
 
+# REQUIRE_FRESH="glob:max_age_seconds:min_bytes": for dumps another process
+# writes into a mounted directory. The newest match (by mtime) must be young
+# and big enough, or the run fails: backing up yesterday's DB next to today's
+# files would look healthy and be wrong.
+if [ -n "${REQUIRE_FRESH:-}" ]; then
+  rf_glob=${REQUIRE_FRESH%%:*}; rf_rest=${REQUIRE_FRESH#*:}
+  rf_age=${rf_rest%%:*}; rf_min=${rf_rest#*:}
+  newest=""; rf_mtime=0
+  # shellcheck disable=SC2086 # the glob must expand
+  for f in $rf_glob; do
+    [ -f "$f" ] || continue
+    m=$(stat -c %Y "$f")
+    if [ -z "$newest" ] || [ "$m" -gt "$rf_mtime" ]; then newest=$f; rf_mtime=$m; fi
+  done
+  if [ -z "$newest" ]; then fail "REQUIRE_FRESH: no file matches $rf_glob"; fi
+  rf_size=$(wc -c < "$newest")
+  [ $(( $(date +%s) - rf_mtime )) -le "$rf_age" ] \
+    || fail "REQUIRE_FRESH: newest $(basename "$newest") is stale ($(( ($(date +%s) - rf_mtime) / 3600 ))h old)"
+  [ "$rf_size" -ge "$rf_min" ] || fail "REQUIRE_FRESH: newest $(basename "$newest") is too small ($rf_size < $rf_min bytes)"
+  log "REQUIRE_FRESH ok: $(basename "$newest"), $rf_size bytes"
+fi
+
 floor_for() { # per-file floor from SQLITE_FILES, else DUMP_MIN_BYTES
   for pair in ${FLOORS:-}; do
     case "$pair" in "$1="*) echo "${pair#*=}"; return ;; esac

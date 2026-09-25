@@ -32,6 +32,7 @@ rather than riding restic's ~15-minute retry loop.
 | `DB_NAME` | — | database to dump (mariadb; postgres uses `pg_dumpall`) |
 | `SQLITE_FILES` | — | space-separated database paths, copied with `.backup` and checked with `PRAGMA integrity_check` (sqlite). `path:min_bytes` sets a per-file floor. Basenames must be unique and use only letters, digits, `.`, `_`, `-`; a missing file fails the run (it is never created). No spaces in paths. |
 | `SQLITE_CHECK` | — | optional `basename:SQL` run on the copy; must return a number ≥ 1 (e.g. `data.db:select count(*) from systems`) |
+| `REQUIRE_FRESH` | — | `glob:max_age_seconds:min_bytes` for dumps written by another process into a mounted dir: the newest match must be younger and bigger than that, or the run fails without a snapshot |
 | `EXTRA_PATHS` | — | files/directories included as-is (mount them read-only) |
 | `DUMP_MIN_BYTES` | `1024` | per-dump size floor; a smaller dump fails the run |
 | `SCHEDULE` | — | cron expression for `schedule` mode |

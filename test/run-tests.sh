@@ -227,6 +227,27 @@ if [ "$(snapcount "$R12")" -ge 1 ] && docker exec bsc-sched test -f /run/backup/
 else no T12-scheduled-run; docker logs bsc-sched 2>&1 | tail -10; fi
 docker rm -f bsc-sched >/dev/null
 
+# T16: REQUIRE_FRESH guards an externally produced dump (newest match must be
+# young enough and big enough; otherwise no snapshot)
+docker volume rm -f bsc-test_fresh >/dev/null 2>&1 || true
+R16="$REPO_BASE/t/fresh"
+fresh() { # fresh <REQUIRE_FRESH value>: one DUMP_KIND=none run over /src
+  sidecar -v bsc-test_fresh:/src -e DUMP_KIND=none -e EXTRA_PATHS=/src \
+    -e "REQUIRE_FRESH=$1" -e "RESTIC_REPOSITORY=$R16" -e RESTIC_HOST=t-fresh "$IMG" run >/tmp/t16.log 2>&1
+}
+docker run --rm -v bsc-test_fresh:/src --entrypoint sh "$IMG" -c \
+  'mkdir -p /src/backups && head -c 20000 /dev/urandom > /src/backups/db-new.sql.gz && head -c 20000 /dev/urandom > /src/backups/db-old.sql.gz && touch -d "2020-01-01 00:00:00" /src/backups/db-old.sql.gz && head -c 10 /dev/urandom > /src/backups/tiny.gz' >/dev/null
+if fresh "/src/backups/db-*.sql.gz:93600:10000"; then ok T16a-fresh-passes; else no T16a-fresh-passes; cat /tmp/t16.log; fi
+n16=$(snapcount "$R16")
+if fresh "/src/backups/db-old.sql.gz:93600:10000"; then no T16b-stale-accepted
+elif grep -q 'is stale' /tmp/t16.log; then ok T16b-stale-refused; else no T16b-wrong-reason; cat /tmp/t16.log; fi
+if fresh "/src/backups/tiny.gz:93600:10000"; then no T16c-small-accepted
+elif grep -q 'too small' /tmp/t16.log; then ok T16c-small-refused; else no T16c-wrong-reason; cat /tmp/t16.log; fi
+if fresh "/src/backups/nothing-*.gz:93600:1"; then no T16d-no-match-accepted
+elif grep -q 'no file matches' /tmp/t16.log; then ok T16d-no-match-refused; else no T16d-wrong-reason; cat /tmp/t16.log; fi
+if [ "$(snapcount "$R16")" = "$n16" ]; then ok T16e-failures-no-snapshot; else no "T16e-snapshots $n16->$(snapcount "$R16")"; fi
+docker volume rm -f bsc-test_fresh >/dev/null 2>&1 || true
+
 # --- Task 3 appends T7-T10 above this line ---
 
 $C down -v >/dev/null 2>&1
