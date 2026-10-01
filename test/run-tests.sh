@@ -248,6 +248,46 @@ elif grep -q 'no file matches' /tmp/t16.log; then ok T16d-no-match-refused; else
 if [ "$(snapcount "$R16")" = "$n16" ]; then ok T16e-failures-no-snapshot; else no "T16e-snapshots $n16->$(snapcount "$R16")"; fi
 docker volume rm -f bsc-test_fresh >/dev/null 2>&1 || true
 
+# T17-T20: PRE_BACKUP_CMD / POST_BACKUP_CMD bracket the run; POST always runs
+docker volume rm -f bsc-test_hooks >/dev/null 2>&1 || true
+R17="$REPO_BASE/t/hooks"
+hooks() { # hooks <docker args...> <image> <mode>: a run with the hook env and the hooks volume at /h
+  sidecar -v bsc-test_hooks:/h -e DUMP_KIND=none -e EXTRA_PATHS=/h \
+    -e "PRE_BACKUP_CMD=touch /h/pre-ran && touch /h/in-window" -e "POST_BACKUP_CMD=rm -f /h/in-window && touch /h/post-ran" \
+    -e "RESTIC_REPOSITORY=$R17" -e RESTIC_HOST=t-hooks "$@" >/tmp/t17.log 2>&1
+}
+hvol() { docker run --rm -v bsc-test_hooks:/h --entrypoint sh "$IMG" -c "$1"; }
+hvol 'rm -f /h/*; echo x > /h/f'
+if hooks "$IMG" run && hvol 'test -e /h/pre-ran && test -e /h/post-ran && test ! -e /h/in-window' \
+   && restic_raw "$R17" ls latest 2>/dev/null | grep -q '/h/in-window'; then ok T17-hooks-bracket-backup
+else no T17-hooks-bracket-backup; cat /tmp/t17.log; fi
+# T18: dump failure -> POST still runs
+hvol 'rm -f /h/pre-ran /h/post-ran /h/in-window'
+if hooks -e DUMP_KIND=postgres -e DB_HOST=nowhere -e DB_USER=x -e DB_PASSWORD=x "$IMG" run; then no T18-failed-dump-accepted
+elif hvol 'test -e /h/post-ran && test ! -e /h/in-window'; then ok T18-post-runs-on-failure; else no T18-post-skipped; cat /tmp/t17.log; fi
+# T19: PRE fails -> no snapshot, POST still runs
+n17=$(snapcount "$R17"); hvol 'rm -f /h/post-ran'
+if sidecar -v bsc-test_hooks:/h -e DUMP_KIND=none -e EXTRA_PATHS=/h -e "PRE_BACKUP_CMD=false" -e "POST_BACKUP_CMD=touch /h/post-ran" \
+     -e "RESTIC_REPOSITORY=$R17" -e RESTIC_HOST=t-hooks "$IMG" run >/tmp/t19.log 2>&1; then no T19-failed-pre-accepted
+elif [ "$(snapcount "$R17")" = "$n17" ] && hvol 'test -e /h/post-ran'; then ok T19-failed-pre-no-snapshot-post-runs
+else no T19-failed-pre; cat /tmp/t19.log; fi
+# T20: schedule mode runs POST at start (cleanup after a killed run)
+hvol 'touch /h/in-window; rm -f /h/post-ran'
+# shellcheck disable=SC2086
+docker run -d --name bsc-hookstart --network "$NET" --tmpfs /run/backup --tmpfs /var/tmp $S3ENV -e RESTIC_PASSWORD=repo-pass \
+  -v bsc-test_hooks:/h -e DUMP_KIND=none -e EXTRA_PATHS=/h -e SCHEDULE="0 0 1 1 *" \
+  -e "POST_BACKUP_CMD=rm -f /h/in-window && touch /h/post-ran" -e "RESTIC_REPOSITORY=$R17" -e RESTIC_HOST=t-hooks "$IMG" >/dev/null
+sleep 5
+if hvol 'test -e /h/post-ran && test ! -e /h/in-window'; then ok T20-post-at-start; else no T20-post-at-start; docker logs bsc-hookstart 2>&1 | tail -5; fi
+docker rm -f bsc-hookstart >/dev/null; docker volume rm -f bsc-test_hooks >/dev/null 2>&1 || true
+
+# T21: mariadb dumps keep 4-byte UTF-8 (emoji) intact
+docker exec -i bsc-test-mariadb-1 mariadb -uapp -pmdbpass app -e "CREATE TABLE IF NOT EXISTS emo (s VARCHAR(20) CHARACTER SET utf8mb4); DELETE FROM emo; INSERT INTO emo VALUES ('ok-🚀-ok');"
+R21="$REPO_BASE/t/emoji"
+sidecar -e DUMP_KIND=mariadb -e DB_HOST=mariadb -e DB_USER=app -e DB_PASSWORD=mdbpass -e DB_NAME=app -e DUMP_MIN_BYTES=100 \
+  -e "RESTIC_REPOSITORY=$R21" -e RESTIC_HOST=t-emoji "$IMG" run >/tmp/t21.log 2>&1 || true
+if restic_raw "$R21" dump latest /var/tmp/dump/app.sql 2>/dev/null | grep -q 'ok-🚀-ok'; then ok T21-utf8mb4-dump; else no T21-utf8mb4-dump; tail -3 /tmp/t21.log; fi
+
 # --- Task 3 appends T7-T10 above this line ---
 
 $C down -v >/dev/null 2>&1

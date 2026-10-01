@@ -10,7 +10,18 @@ require_env DUMP_KIND
 DUMP_DIR=/var/tmp/dump
 MIN=${DUMP_MIN_BYTES:-1024}
 rm -rf "$DUMP_DIR"; mkdir -p "$DUMP_DIR"
-trap 'rm -rf "$DUMP_DIR"' EXIT
+
+# PRE_BACKUP_CMD / POST_BACKUP_CMD: generic hooks around the dump and the
+# backup (e.g. putting an app into maintenance mode). Once PRE has run, POST
+# always runs -- on success, on failure, and from the EXIT trap -- so the
+# hook's effect is never left behind by this process.
+HOOK_ACTIVE=0
+post_hook() {
+  [ -n "${POST_BACKUP_CMD:-}" ] && [ "$HOOK_ACTIVE" = 1 ] || return 0
+  HOOK_ACTIVE=0
+  sh -c "$POST_BACKUP_CMD" || alert "POST_BACKUP_CMD failed (exit $?)"
+}
+trap 'post_hook; rm -rf "$DUMP_DIR"' EXIT
 
 # Init only when the repo definitely does not exist. restic reports network,
 # DNS, TLS and permission failures inside the same "unable to open config
@@ -28,6 +39,11 @@ if ! out=$(timeout "${PROBE_TIMEOUT_SECONDS:-120}" restic cat config 2>&1 >/dev/
   esac
 fi
 
+if [ -n "${PRE_BACKUP_CMD:-}" ]; then
+  HOOK_ACTIVE=1
+  sh -c "$PRE_BACKUP_CMD" || fail "PRE_BACKUP_CMD failed"
+fi
+
 case "$DUMP_KIND" in
   postgres)
     require_env DB_HOST DB_USER DB_PASSWORD
@@ -36,7 +52,7 @@ case "$DUMP_KIND" in
   mariadb)
     require_env DB_HOST DB_USER DB_PASSWORD DB_NAME
     MYSQL_PWD="$DB_PASSWORD" mariadb-dump -h "$DB_HOST" -u "$DB_USER" \
-      --single-transaction --routines --triggers --events "$DB_NAME" > "$DUMP_DIR/$DB_NAME.sql" \
+      --single-transaction --default-character-set=utf8mb4 --routines --triggers --events "$DB_NAME" > "$DUMP_DIR/$DB_NAME.sql" \
       || fail "mariadb-dump failed" ;;
   sqlite)
     # SQLITE_FILES: space-separated "path" or "path:min_bytes" (a per-file
@@ -109,4 +125,5 @@ done
 restic backup --host "$RESTIC_HOST" --tag nightly --retry-lock 10m "$DUMP_DIR" ${EXTRA_PATHS:-} \
   || fail "restic backup failed"
 date +%s > "$STATE_DIR/last-success"
+post_hook
 log "backup complete"
