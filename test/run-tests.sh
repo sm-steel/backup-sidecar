@@ -32,7 +32,17 @@ restic_stdin() {
   # shellcheck disable=SC2086
   docker run --rm -i --network "$NET" --entrypoint restic $S3ENV -e RESTIC_PASSWORD=repo-pass "$IMG" -r "$r" backup --stdin -q "$@" >/dev/null
 }
-snapcount() { restic_raw "$1" snapshots --json 2>/dev/null | jq length 2>/dev/null || echo 0; }
+# snapcount <repo>: the number of snapshots, or ERR when restic or jq fails
+# (jq prints nothing and exits 0 on empty input, so test the output itself).
+snapcount() {
+  n=$(restic_raw "$1" snapshots --json 2>/dev/null | jq length 2>/dev/null) || n=
+  if isnum "$n"; then echo "$n"; else echo ERR; fi
+}
+isnum() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
+# snap_is <repo> <n> / snap_atleast <repo> <n>: true only when both counts are
+# real numbers, so an unreadable repository never passes a comparison.
+snap_is() { c=$(snapcount "$1"); isnum "$c" && isnum "$2" && [ "$c" -eq "$2" ]; }
+snap_atleast() { c=$(snapcount "$1"); isnum "$c" && [ "$c" -ge "$2" ]; }
 
 $C down -v >/dev/null 2>&1 || true
 docker volume rm -f bsc-test_sqlite >/dev/null 2>&1 || true  # used only by docker run, so compose never removes it
@@ -46,13 +56,20 @@ until docker run --rm --network "$NET" --entrypoint rclone -e RCLONE_CONFIG_M_TY
 done
 sleep 8  # DB init scripts
 
+# T0: the harness itself. A count restic can't read is ERR, never "" -- two
+# empty counts compared equal and turned failures into PASS lines.
+RX="$REPO_BASE/t/never-initialised"
+nx=$(snapcount "$RX")
+if [ "$nx" = ERR ]; then ok T0-unreadable-count-is-ERR; else no "T0-unreadable-count-is-'$nx'"; fi
+if snap_is "$RX" "$nx"; then no T0-unreadable-counts-compare-equal; else ok T0-unreadable-counts-unequal; fi
+
 PG="-e DUMP_KIND=postgres -e DB_HOST=postgres -e DB_USER=app -e DB_PASSWORD=pgpass -e DUMP_MIN_BYTES=100"
 R1="$REPO_BASE/t/pg"
 
 # T1: first run on an empty prefix -> init + 1 snapshot with the marker and the extra role
 # shellcheck disable=SC2086
 if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t1.log 2>&1 \
-   && [ "$(snapcount $R1)" = 1 ]; then ok T1-first-run; else no T1-first-run; cat /tmp/t1.log; fi
+   && snap_is "$R1" 1; then ok T1-first-run; else no T1-first-run; cat /tmp/t1.log; fi
 dump=$(restic_raw $R1 dump latest /var/tmp/dump/pg_dumpall.sql 2>/dev/null || true)
 # printf, not echo: dash's echo treats pg_dumpall's "\connect" as "\c" (stop output)
 if printf '%s\n' "$dump" | grep -q 'backup-sidecar-postgres-marker' && printf '%s\n' "$dump" | grep -q 'extra_role'; then
@@ -75,13 +92,13 @@ if sidecar -e DUMP_KIND=postgres -e DB_HOST=postgres17 -e DB_USER=app -e DB_PASS
 R15="$REPO_BASE/t/pg15"
 if sidecar -e DUMP_KIND=postgres -e DB_HOST=postgres15 -e DB_USER=app -e DB_PASSWORD=pgpass -e DUMP_MIN_BYTES=100 \
      -e RESTIC_REPOSITORY=$R15 -e RESTIC_HOST=t-pg15 "$IMG" run >/tmp/t1x.log 2>&1; then no T1x-unsupported-major-accepted
-elif grep -q 'server is PostgreSQL 15' /tmp/t1x.log && [ "$(snapcount $R15)" = 0 ]; then ok T1x-unsupported-major
+elif grep -q 'server is PostgreSQL 15' /tmp/t1x.log && snap_is "$R15" 0; then ok T1x-unsupported-major
 else no T1x-unsupported-major-message; cat /tmp/t1x.log; fi
 
 # T2: second run -> no re-init, 2 snapshots
 # shellcheck disable=SC2086
 if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t2.log 2>&1 \
-   && [ "$(snapcount $R1)" = 2 ] && ! grep -q 'no repository yet' /tmp/t2.log; then ok T2-second-run; else no T2-second-run; cat /tmp/t2.log; fi
+   && snap_is "$R1" 2 && ! grep -q 'no repository yet' /tmp/t2.log; then ok T2-second-run; else no T2-second-run; cat /tmp/t2.log; fi
 
 # T2b: unreachable endpoint -> non-zero, and it must NOT try to init (review focus #5)
 # shellcheck disable=SC2086
@@ -91,12 +108,12 @@ elif grep -q 'not initialising' /tmp/t2b.log && ! grep -q 'no repository yet' /t
 # T3: wrong DB password -> non-zero, no new snapshot (review focus #1)
 if sidecar -e DUMP_KIND=postgres -e DB_HOST=postgres -e DB_USER=app -e DB_PASSWORD=WRONG \
      -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t3.log 2>&1; then no T3-bad-password
-elif [ "$(snapcount $R1)" = 2 ]; then ok T3-bad-password; else no T3-bad-password-snapshot-created; fi
+elif snap_is "$R1" 2; then ok T3-bad-password; else no T3-bad-password-snapshot-created; fi
 
 # T4: size floor -> non-zero, no snapshot
 # shellcheck disable=SC2086
 if sidecar $PG -e DUMP_MIN_BYTES=999999999 -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t4.log 2>&1; then no T4-size-floor
-elif [ "$(snapcount $R1)" = 2 ]; then ok T4-size-floor; else no T4-size-floor-snapshot-created; fi
+elif snap_is "$R1" 2; then ok T4-size-floor; else no T4-size-floor-snapshot-created; fi
 
 # T5: mariadb as the app user
 R5="$REPO_BASE/t/mdb"
@@ -135,7 +152,7 @@ elif grep -q 'data.db is' /tmp/t6x.log; then ok T6e-per-file-floor; else no T6e-
 # sanity query: must return >= 1 on the copy
 if sq6 /data/data.db -e "SQLITE_CHECK=data.db:select count(*) from t where x=0"; then no T6f-check-sql-ignored
 elif grep -q 'sanity check' /tmp/t6x.log; then ok T6f-check-sql-fails; else no T6f-check-sql-wrong-reason; cat /tmp/t6x.log; fi
-if [ "$(snapcount "$R6")" = "$n6" ]; then ok T6-edge-cases-no-snapshot; else no "T6-edge-cases-made-snapshots $n6->$(snapcount "$R6")"; fi
+if snap_is "$R6" "$n6"; then ok T6-edge-cases-no-snapshot; else no "T6-edge-cases-made-snapshots $n6->$(snapcount "$R6")"; fi
 if sq6 "/data/data.db:100 /data/a/x.db:100" -e "SQLITE_CHECK=data.db:select count(*) from t"; then ok T6g-floors-and-check-pass
 else no T6g-floors-and-check-pass; cat /tmp/t6x.log; fi
 
@@ -179,7 +196,7 @@ if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t8b
 # shellcheck disable=SC2086
 if sidecar -e LOCK_MAX_AGE_SECONDS=0 -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t8c.log 2>&1; then no T8c-stale-lock-not-reported
 elif ! tglog | grep -q 'removed.stale.lock'; then no T8c-no-removal-alert; cat /tmp/t8c.log
-elif [ -n "$(restic_raw "$R1" list locks --no-lock 2>/dev/null)" ]; then no T8c-lock-still-there
+elif ! locks=$(restic_raw "$R1" list locks --no-lock 2>/dev/null) || [ -n "$locks" ]; then no T8c-lock-still-there-or-unreadable
 elif grep -q 'forget/prune failed' /tmp/t8c.log; then no T8c-prune-still-blocked; cat /tmp/t8c.log
 else ok T8c-weekly-clears-stale-lock; fi
 
@@ -192,7 +209,7 @@ before=$(snapcount "$R1")
 awscli s3api create-multipart-upload --bucket bsc --key t/pgsib/data/zz-other >/dev/null
 # shellcheck disable=SC2086
 if sidecar -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" weekly >/tmp/t9.log 2>&1 \
-   && [ "$before" -ge 5 ] && [ "$(snapcount "$R1")" = 2 ]; then ok T9-weekly-retention; else no "T9-weekly-retention before=$before after=$(snapcount "$R1")"; cat /tmp/t9.log; fi
+   && isnum "$before" && [ "$before" -ge 5 ] && snap_is "$R1" 2; then ok T9-weekly-retention; else no "T9-weekly-retention before=$before after=$(snapcount "$R1")"; cat /tmp/t9.log; fi
 if grep -q 'multipart' /tmp/t9.log; then no T9b-sibling-prefix-reported; else ok T9b-sibling-prefix-ignored; fi
 
 # T13: a failing multipart listing is a problem, not "0 found"
@@ -208,7 +225,7 @@ restic_raw "$R15" init >/dev/null 2>&1
 for p in a b a b; do echo "$p" | restic_stdin "$R15" --host t-grp --stdin-filename "$p.txt"; done
 # shellcheck disable=SC2086
 sidecar -e KEEP_DAILY=1 -e KEEP_WEEKLY=0 -e KEEP_MONTHLY=0 -e READ_SUBSET=10% -e RESTIC_REPOSITORY=$R15 -e RESTIC_HOST=t-grp "$IMG" weekly >/tmp/t15.log 2>&1 || true
-if [ "$(snapcount "$R15")" = 1 ]; then ok T15-group-by-host; else no "T15-group-by-host left=$(snapcount "$R15")"; fi
+if snap_is "$R15" 1; then ok T15-group-by-host; else no "T15-group-by-host left=$(snapcount "$R15")"; fi
 
 # T10: an abandoned multipart upload under the prefix is aborted by weekly (MULTIPART_MAX_AGE=0s) and alerted
 awscli s3api create-multipart-upload --bucket bsc --key t/pg/data/zz-orphan >/dev/null
@@ -242,8 +259,8 @@ R12="$REPO_BASE/t/sched"
 docker run -d --name bsc-sched --network "$NET" --tmpfs /run/backup --tmpfs /var/tmp $S3ENV -e RESTIC_PASSWORD=repo-pass \
   -e DUMP_KIND=none -e EXTRA_PATHS=/etc/hostname -e SCHEDULE="* * * * *" \
   -e RESTIC_REPOSITORY=$R12 -e RESTIC_HOST=t-sched "$IMG" >/dev/null
-i=0; until [ "$(snapcount "$R12")" -ge 1 ] || [ "$i" -ge 12 ]; do i=$((i+1)); sleep 10; done
-if [ "$(snapcount "$R12")" -ge 1 ] && docker exec bsc-sched test -f /run/backup/last-success; then ok T12-scheduled-run
+i=0; until snap_atleast "$R12" 1 || [ "$i" -ge 12 ]; do i=$((i+1)); sleep 10; done
+if snap_atleast "$R12" 1 && docker exec bsc-sched test -f /run/backup/last-success; then ok T12-scheduled-run
 else no T12-scheduled-run; docker logs bsc-sched 2>&1 | tail -10; fi
 docker rm -f bsc-sched >/dev/null
 
@@ -265,7 +282,7 @@ if fresh "/src/backups/tiny.gz:93600:10000"; then no T16c-small-accepted
 elif grep -q 'too small' /tmp/t16.log; then ok T16c-small-refused; else no T16c-wrong-reason; cat /tmp/t16.log; fi
 if fresh "/src/backups/nothing-*.gz:93600:1"; then no T16d-no-match-accepted
 elif grep -q 'no file matches' /tmp/t16.log; then ok T16d-no-match-refused; else no T16d-wrong-reason; cat /tmp/t16.log; fi
-if [ "$(snapcount "$R16")" = "$n16" ]; then ok T16e-failures-no-snapshot; else no "T16e-snapshots $n16->$(snapcount "$R16")"; fi
+if snap_is "$R16" "$n16"; then ok T16e-failures-no-snapshot; else no "T16e-snapshots $n16->$(snapcount "$R16")"; fi
 docker volume rm -f bsc-test_fresh >/dev/null 2>&1 || true
 
 # T17-T20: PRE_BACKUP_CMD / POST_BACKUP_CMD bracket the run; POST always runs
@@ -289,7 +306,7 @@ elif hvol 'test -e /h/post-ran && test ! -e /h/in-window'; then ok T18-post-runs
 n17=$(snapcount "$R17"); hvol 'rm -f /h/post-ran'
 if sidecar -v bsc-test_hooks:/h -e DUMP_KIND=none -e EXTRA_PATHS=/h -e "PRE_BACKUP_CMD=false" -e "POST_BACKUP_CMD=touch /h/post-ran" \
      -e "RESTIC_REPOSITORY=$R17" -e RESTIC_HOST=t-hooks "$IMG" run >/tmp/t19.log 2>&1; then no T19-failed-pre-accepted
-elif [ "$(snapcount "$R17")" = "$n17" ] && hvol 'test -e /h/post-ran'; then ok T19-failed-pre-no-snapshot-post-runs
+elif snap_is "$R17" "$n17" && hvol 'test -e /h/post-ran'; then ok T19-failed-pre-no-snapshot-post-runs
 else no T19-failed-pre; cat /tmp/t19.log; fi
 # T20: schedule mode runs POST at start (cleanup after a killed run)
 hvol 'touch /h/in-window; rm -f /h/post-ran'
