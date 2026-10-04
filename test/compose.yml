@@ -12,6 +12,15 @@ services:
     image: postgres:16.15-alpine
     environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: pgpass, POSTGRES_DB: app}
     volumes: [./seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro]
+  # Version-aware pg_dumpall: each server is dumped by its own major's client.
+  postgres17:
+    image: postgres:17.11-alpine
+    environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: pgpass, POSTGRES_DB: app}
+    volumes: [./seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro]
+  # A major the image ships no client for: must fail clearly, not mis-dump.
+  postgres15:
+    image: postgres:15.14-alpine
+    environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: pgpass, POSTGRES_DB: app}
   mariadb:
     image: mariadb:11.8.8
     environment: {MARIADB_ROOT_PASSWORD: rootpass, MARIADB_DATABASE: app, MARIADB_USER: app, MARIADB_PASSWORD: mdbpass}

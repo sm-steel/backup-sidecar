@@ -8,7 +8,7 @@ ARG RCLONE_VERSION=1.75.1
 ARG RCLONE_SHA256=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
 
 RUN apk add --no-cache ca-certificates curl jq tzdata \
-      postgresql16-client mariadb-client sqlite \
+      postgresql16-client postgresql17-client mariadb-client sqlite \
  && cd /tmp \
  && curl -fsSLo restic.bz2 "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2" \
  && echo "${RESTIC_SHA256}  restic.bz2" | sha256sum -c - \

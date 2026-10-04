@@ -47,7 +47,19 @@ fi
 case "$DUMP_KIND" in
   postgres)
     require_env DB_HOST DB_USER DB_PASSWORD
-    PGPASSWORD="$DB_PASSWORD" pg_dumpall -h "$DB_HOST" -U "$DB_USER" -f "$DUMP_DIR/pg_dumpall.sql" \
+    # Dump with the client of the server's own major version. An older
+    # client refuses a newer server; a newer one writes settings an older
+    # server rejects on restore (pg_dump 17: SET transaction_timeout).
+    pg_num=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U "$DB_USER" -d postgres -tAXc 'SHOW server_version_num') \
+      || fail "cannot query the PostgreSQL server version"
+    pg_major=$((pg_num / 10000))
+    pg_dumpall_bin="/usr/libexec/postgresql$pg_major/pg_dumpall"
+    if [ ! -x "$pg_dumpall_bin" ]; then
+      have=$(for d in /usr/libexec/postgresql[0-9]*; do [ -x "$d/pg_dumpall" ] && printf '%s ' "${d##*postgresql}"; done)
+      fail "server is PostgreSQL $pg_major; this image has pg_dumpall for: ${have:-none}"
+    fi
+    log "postgres: server $pg_major, using $pg_dumpall_bin"
+    PGPASSWORD="$DB_PASSWORD" "$pg_dumpall_bin" -h "$DB_HOST" -U "$DB_USER" -f "$DUMP_DIR/pg_dumpall.sql" \
       || fail "pg_dumpall failed" ;;
   mariadb)
     require_env DB_HOST DB_USER DB_PASSWORD DB_NAME

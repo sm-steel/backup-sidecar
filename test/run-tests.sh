@@ -57,6 +57,26 @@ dump=$(restic_raw $R1 dump latest /var/tmp/dump/pg_dumpall.sql 2>/dev/null || tr
 # printf, not echo: dash's echo treats pg_dumpall's "\connect" as "\c" (stop output)
 if printf '%s\n' "$dump" | grep -q 'backup-sidecar-postgres-marker' && printf '%s\n' "$dump" | grep -q 'extra_role'; then
   ok T1-dump-content; else no T1-dump-content; echo "--- dump head:"; printf '%s\n' "$dump" | head -20; restic_raw $R1 ls latest 2>&1 | tail -5; fi
+# T1v: a PG16 server is dumped by pg_dumpall 16 -- a newer client writes
+# settings an older server rejects on restore (pg_dump 17: transaction_timeout)
+if printf '%s\n' "$dump" | grep -q 'Dumped by pg_dump version 16\.' \
+   && ! printf '%s\n' "$dump" | grep -q 'transaction_timeout'; then ok T1v-pg16-own-client
+else no T1v-pg16-own-client; printf '%s\n' "$dump" | grep -m3 'Dumped\|transaction_timeout'; fi
+
+# T1w: a PG17 server is dumped by pg_dumpall 17
+R17="$REPO_BASE/t/pg17"
+# shellcheck disable=SC2086
+if sidecar -e DUMP_KIND=postgres -e DB_HOST=postgres17 -e DB_USER=app -e DB_PASSWORD=pgpass -e DUMP_MIN_BYTES=100 \
+     -e RESTIC_REPOSITORY=$R17 -e RESTIC_HOST=t-pg17 "$IMG" run >/tmp/t1w.log 2>&1 \
+   && restic_raw $R17 dump latest /var/tmp/dump/pg_dumpall.sql 2>/dev/null | grep -q 'Dumped by pg_dump version 17\.'; then
+  ok T1w-pg17-own-client; else no T1w-pg17-own-client; cat /tmp/t1w.log; fi
+
+# T1x: a server major the image has no client for -> clear failure, no snapshot
+R15="$REPO_BASE/t/pg15"
+if sidecar -e DUMP_KIND=postgres -e DB_HOST=postgres15 -e DB_USER=app -e DB_PASSWORD=pgpass -e DUMP_MIN_BYTES=100 \
+     -e RESTIC_REPOSITORY=$R15 -e RESTIC_HOST=t-pg15 "$IMG" run >/tmp/t1x.log 2>&1; then no T1x-unsupported-major-accepted
+elif grep -q 'server is PostgreSQL 15' /tmp/t1x.log && [ "$(snapcount $R15)" = 0 ]; then ok T1x-unsupported-major
+else no T1x-unsupported-major-message; cat /tmp/t1x.log; fi
 
 # T2: second run -> no re-init, 2 snapshots
 # shellcheck disable=SC2086
