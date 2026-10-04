@@ -95,6 +95,18 @@ if sidecar -e DUMP_KIND=postgres -e DB_HOST=postgres15 -e DB_USER=app -e DB_PASS
 elif grep -q 'server is PostgreSQL 15' /tmp/t1x.log && snap_is "$R15" 0; then ok T1x-unsupported-major
 else no T1x-unsupported-major-message; cat /tmp/t1x.log; fi
 
+# T1y: a server version that isn't a number (or is empty) -> clear failure,
+# no snapshot. A fake psql earlier in PATH stands in for a confused server.
+R1y="$REPO_BASE/t/pgbad"
+for out in garbage ''; do
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$out" > /tmp/fake-psql && chmod 755 /tmp/fake-psql
+  # shellcheck disable=SC2086
+  if sidecar $PG -v /tmp/fake-psql:/usr/local/bin/psql:ro -e RESTIC_REPOSITORY=$R1y -e RESTIC_HOST=t-pgbad "$IMG" run >/tmp/t1y.log 2>&1; then
+    no "T1y-non-numeric-version-accepted ('$out')"
+  elif grep -q "unexpected server_version_num '$out'" /tmp/t1y.log && snap_is "$R1y" 0; then ok "T1y-non-numeric-version ('$out')"
+  else no "T1y-non-numeric-version-message ('$out')"; cat /tmp/t1y.log; fi
+done
+
 # T2: second run -> no re-init, 2 snapshots
 # shellcheck disable=SC2086
 if sidecar $PG -e RESTIC_REPOSITORY=$R1 -e RESTIC_HOST=t-pg "$IMG" run >/tmp/t2.log 2>&1 \

@@ -52,6 +52,9 @@ case "$DUMP_KIND" in
     # server rejects on restore (pg_dump 17: SET transaction_timeout).
     pg_num=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U "$DB_USER" -d postgres -tAXc 'SHOW server_version_num') \
       || fail "cannot query the PostgreSQL server version"
+    # Validate before arithmetic: in sh a non-number aborts $((...)) without
+    # reaching fail() (no alert), and an empty one reads as "PostgreSQL 0".
+    case "$pg_num" in ''|*[!0-9]*) fail "unexpected server_version_num '$pg_num'" ;; esac
     pg_major=$((pg_num / 10000))
     pg_dumpall_bin="/usr/libexec/postgresql$pg_major/pg_dumpall"
     if [ ! -x "$pg_dumpall_bin" ]; then
