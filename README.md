@@ -111,7 +111,15 @@ original paths.
 | restic | 0.19.1 | `RESTIC_VERSION` + `RESTIC_SHA256` (upstream `SHA256SUMS`) |
 | supercronic | 0.2.49 | `SUPERCRONIC_VERSION` + `SUPERCRONIC_SHA1` (release notes) |
 | rclone | 1.75.1 | `RCLONE_VERSION` + `RCLONE_SHA256` (upstream `SHA256SUMS`) |
-| DB clients | Alpine packages | `postgresql16-client`, `mariadb-client`, `sqlite` |
+| DB clients | Alpine packages | `postgresql16-client`, `postgresql17-client`, `mariadb-client`, `sqlite` |
+
+`DUMP_KIND=postgres` is **version-aware**: it asks the server for its major
+version and dumps with that major's `pg_dumpall` (`/usr/libexec/postgresqlNN/`).
+An older client refuses a newer server, and a newer client writes settings an
+older server rejects on restore (`pg_dump` 17 adds `SET transaction_timeout`).
+A server major with no installed client fails the run with a clear message
+and no snapshot. To support another major, add its `postgresqlNN-client`
+package and a test server in `test/compose.yml`.
 
 To bump: change the ARG and its checksum together, taken from the upstream
 release's checksum file (never computed from a download you just made), run
