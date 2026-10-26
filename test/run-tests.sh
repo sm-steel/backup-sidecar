@@ -35,7 +35,7 @@ restic_stdin() {
 # snapcount <repo>: the number of snapshots, or ERR when restic or jq fails
 # (jq prints nothing and exits 0 on empty input, so test the output itself).
 snapcount() {
-  n=$(restic_raw "$1" snapshots --json 2>/dev/null | jq length 2>/dev/null) || n=
+  n=$(restic_raw "$1" snapshots --json --no-lock 2>/dev/null | jq length 2>/dev/null) || n=
   if isnum "$n"; then echo "$n"; else echo ERR; fi
 }
 isnum() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
@@ -336,6 +336,52 @@ R21="$REPO_BASE/t/emoji"
 sidecar -e DUMP_KIND=mariadb -e DB_HOST=mariadb -e DB_USER=app -e DB_PASSWORD=mdbpass -e DB_NAME=app -e DUMP_MIN_BYTES=100 \
   -e "RESTIC_REPOSITORY=$R21" -e RESTIC_HOST=t-emoji "$IMG" run >/tmp/t21.log 2>&1 || true
 if restic_raw "$R21" dump latest /var/tmp/dump/app.sql 2>/dev/null | grep -q 'ok-🚀-ok'; then ok T21-utf8mb4-dump; else no T21-utf8mb4-dump; tail -3 /tmp/t21.log; fi
+
+# T22: a killed prune leaves an EXCLUSIVE lock, which blocks every nightly run.
+# run removes it with plain `restic unlock` once it is STALE_LOCK_AGE_SECONDS
+# old, alerts, and backs up; a lock restic itself doesn't call stale stays.
+R22="$REPO_BASE/t/lock"
+# shellcheck disable=SC2086
+sidecar $PG -e RESTIC_REPOSITORY=$R22 -e RESTIC_HOST=t-lock "$IMG" run >/tmp/t22.log 2>&1 || true
+# hold_exclusive <hostname>: an exclusive lock from a killed process on that
+# hostname. `key passwd` locks, then waits on stdin for the new password. The
+# /bin/true loop and the trailing echo keep restic off PID 1 (sh would exec
+# it), so a container with the same hostname sees a dead PID.
+hold_exclusive() {
+  # shellcheck disable=SC2086
+  docker run -d -i --name bsc-excl --hostname "$1" --network "$NET" --entrypoint sh $S3ENV -e RESTIC_PASSWORD=repo-pass "$IMG" \
+    -c "i=0; while [ \$i -lt 300 ]; do /bin/true; i=\$((i+1)); done; restic -r $R22 key passwd; echo held" >/dev/null
+  i=0
+  until [ -n "$(restic_raw "$R22" list locks --no-lock 2>/dev/null)" ]; do
+    i=$((i+1)); [ "$i" -lt 30 ] || break; sleep 1
+  done
+  docker rm -f bsc-excl >/dev/null
+  sleep 2  # older than STALE_LOCK_AGE_SECONDS=0
+}
+nlocks() { restic_raw "$R22" list locks --no-lock 2>/dev/null | wc -l; }
+hold_exclusive bsc-other
+n22=$(snapcount "$R22")
+# T22a: a young lock (default threshold, 1h) is left alone and the run fails
+# shellcheck disable=SC2086
+if sidecar $PG -e RESTIC_REPOSITORY=$R22 -e RESTIC_HOST=t-lock "$IMG" run >/tmp/t22a.log 2>&1; then no T22a-young-lock-ignored
+elif ! grep -q 'already locked' /tmp/t22a.log; then no T22a-wrong-reason; cat /tmp/t22a.log
+elif [ "$(nlocks)" != 1 ] || grep -q 'removed stale lock' /tmp/t22a.log; then no T22a-young-lock-removed
+else ok T22a-young-lock-kept; fi
+# T22b: old enough for us, but restic can't call it stale (another host, < 30 min): kept
+# shellcheck disable=SC2086
+if sidecar $PG -e STALE_LOCK_AGE_SECONDS=0 -e RESTIC_REPOSITORY=$R22 -e RESTIC_HOST=t-lock "$IMG" run >/tmp/t22b.log 2>&1; then no T22b-live-lock-ignored
+elif [ "$(nlocks)" != 1 ] || grep -q 'removed stale lock' /tmp/t22b.log; then no T22b-live-lock-removed; cat /tmp/t22b.log
+elif snap_is "$R22" "$n22"; then ok T22b-restic-decides-staleness
+else no T22b-snapshot-despite-lock; fi
+# T22c: a stale exclusive lock (same hostname, dead PID) is removed, alerted, and the run backs up
+restic_raw "$R22" unlock --remove-all >/dev/null 2>&1
+hold_exclusive bsc-stale
+# shellcheck disable=SC2086
+if ! sidecar --hostname bsc-stale $PG -e STALE_LOCK_AGE_SECONDS=0 -e RESTIC_REPOSITORY=$R22 -e RESTIC_HOST=t-lock "$IMG" run >/tmp/t22c.log 2>&1; then no T22c-run-failed; cat /tmp/t22c.log
+elif ! tglog | grep -q 't-lock.*removed.stale.lock'; then no T22c-no-removal-alert; cat /tmp/t22c.log
+elif [ "$(nlocks)" != 0 ]; then no T22c-lock-still-there
+elif snap_is "$R22" "$((n22 + 1))"; then ok T22c-stale-lock-cleared-and-backed-up
+else no "T22c-snapshots-$(snapcount "$R22")-not-$((n22 + 1))"; fi
 
 # --- Task 3 appends T7-T10 above this line ---
 

@@ -38,3 +38,45 @@ alert() {
 }
 
 fail() { alert "$*"; exit 1; }
+
+to_epoch() { # restic RFC3339 time -> epoch (busybox date handles "YYYY-MM-DD HH:MM:SS")
+  date -u -d "$(printf '%s' "$1" | cut -c1-19 | tr T ' ')" +%s
+}
+
+# "<id> <age in seconds> <exclusive|shared> <hostname>" per lock. A lock that
+# vanishes between list and cat (a run just finished) is skipped rather than
+# aborting the caller.
+lock_ages() {
+  ts=$(date +%s)
+  for id in $(restic list locks --no-lock 2>/dev/null); do
+    l=$(restic cat lock "$id" --no-lock 2>/dev/null | jq -r 'select(.time)
+      | "\(.time) \(if .exclusive then "exclusive" else "shared" end) \(.hostname // "?")"' 2>/dev/null) || continue
+    [ -n "$l" ] || continue
+    echo "$id $(( ts - $(to_epoch "${l%% *}") )) ${l#* }"
+  done
+}
+
+# A killed run (CI's weekly prune, say) leaves its lock behind, and an
+# exclusive one blocks every later run. Once a lock is STALE_LOCK_AGE_SECONDS
+# old, plain `restic unlock` removes only the locks restic itself proves stale
+# (unrefreshed for 30 minutes, or a dead PID on this hostname), never a live
+# one: since restic 0.15 a process that misses its lock refresh aborts rather
+# than carry on unlocked. Every removed lock is alerted. Returns 0 only if a
+# lock was removed.
+clear_stale_locks() {
+  before=$(lock_ages)
+  printf '%s\n' "$before" | awk -v max="${STALE_LOCK_AGE_SECONDS:-3600}" 'NF && $2 >= max { f=1 } END { exit !f }' \
+    || return 1
+  case "$(restic unlock 2>&1)" in *"successfully removed"*) ;; *) return 1 ;; esac
+  after=$(restic list locks --no-lock 2>/dev/null) || return 1
+  removed=1
+  while read -r id lage kind host; do
+    [ -n "$id" ] || continue
+    printf '%s\n' "$after" | grep -qx "$id" && continue
+    alert "removed stale lock $(printf '%s' "$id" | cut -c1-8) ($kind, $host, $((lage/60)) min old)"
+    removed=0
+  done <<EOF
+$before
+EOF
+  return "$removed"
+}

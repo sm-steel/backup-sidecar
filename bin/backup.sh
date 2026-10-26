@@ -29,7 +29,15 @@ trap 'post_hook; rm -rf "$DUMP_DIR"' EXIT
 # initialising over an existing-but-unreachable repository must never happen.
 # restic retries an unreachable backend for ~15 min; the probe is capped so a
 # dead endpoint fails fast (a timed-out probe falls through to "not initialising").
-if ! out=$(timeout "${PROBE_TIMEOUT_SECONDS:-120}" restic cat config 2>&1 >/dev/null); then
+# The probe takes a shared lock, so a stale exclusive lock fails it; once
+# clear_stale_locks removes one, the probe runs again.
+probe() { out=$(timeout "${PROBE_TIMEOUT_SECONDS:-120}" restic cat config 2>&1 >/dev/null); }
+probe_ok=0
+probe && probe_ok=1
+if [ "$probe_ok" = 0 ]; then
+  case "$out" in *"already locked"*) clear_stale_locks && probe && probe_ok=1 ;; esac
+fi
+if [ "$probe_ok" = 0 ]; then
   case "$out" in
     *"no such host"*|*"dial tcp"*|*"connection refused"*|*"i/o timeout"*|*"TLS handshake"*|*"x509"*|*"AccessDenied"*|*"Access Denied"*|*"Forbidden"*|*"SignatureDoesNotMatch"*|*"InvalidAccessKeyId"*)
       fail "cannot reach repository (not initialising): $(printf '%s' "$out" | tail -c 300)" ;;

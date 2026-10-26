@@ -11,20 +11,6 @@ problems=0
 problem() { alert "$*"; problems=$((problems+1)); }
 now=$(date +%s)
 
-to_epoch() { # restic RFC3339 time -> epoch (busybox date handles "YYYY-MM-DD HH:MM:SS")
-  date -u -d "$(printf '%s' "$1" | cut -c1-19 | tr T ' ')" +%s
-}
-
-# "<id> <age in seconds>" per lock. A lock that vanishes between list and cat
-# (a run just finished) is skipped rather than aborting the whole check.
-lock_ages() {
-  for id in $(restic list locks --no-lock 2>/dev/null); do
-    t=$(restic cat lock "$id" --no-lock 2>/dev/null | jq -r '.time // empty' 2>/dev/null) || continue
-    [ -n "$t" ] || continue
-    echo "$id $(( now - $(to_epoch "$t") ))"
-  done
-}
-
 # Right after the Sunday prune at most KEEP_DAILY+KEEP_WEEKLY+KEEP_MONTHLY
 # snapshots remain, and a week of nightlies lands before the next one; the +8
 # covers that week plus a manual run.
@@ -44,7 +30,7 @@ daily() {
   limit=$(max_snapshots)
   [ "$n" -le "$limit" ] || problem "$n snapshots exceeds $limit: retention not working?"
   lock_ages > "$STATE_DIR/locks"
-  while read -r id lage; do
+  while read -r id lage _; do
     [ "$lage" -le "${LOCK_MAX_AGE_SECONDS:-86400}" ] || problem "stale lock $(printf '%s' "$id" | cut -c1-8), $((lage/3600))h old"
   done < "$STATE_DIR/locks"
 }
@@ -62,7 +48,7 @@ weekly() {
   # week. Nothing legitimately holds a lock for LOCK_MAX_AGE_SECONDS (a day), so
   # the prune user removes such locks here, off-host, and reports each one.
   lock_ages > "$STATE_DIR/locks"
-  while read -r id lage; do
+  while read -r id lage _; do
     [ "$lage" -gt "${LOCK_MAX_AGE_SECONDS:-86400}" ] || continue
     if rclone deletefile "b:$path/locks/$id" >/dev/null 2>&1; then
       problem "removed stale lock $(printf '%s' "$id" | cut -c1-8), $((lage/3600))h old"

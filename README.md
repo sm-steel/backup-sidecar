@@ -14,9 +14,21 @@ runs it as a `backup` service in its compose stack, pinned to an exact tag.
 | `weekly` | removes locks older than `LOCK_MAX_AGE_SECONDS` (left by killed runs), then `forget --group-by host` 7d/4w/6m `--prune`, `check --read-data-subset`, multipart sweep of `<prefix>/` (a failed listing alerts), then the daily checks | the deployer's CI, with the **prune** user |
 | `healthcheck` | Docker `HEALTHCHECK`: unhealthy once the last success (or start) is older than `MAX_AGE_SECONDS` | host |
 
-`run` never forgets, prunes, unlocks or deletes anything. The host's write-only
-S3 user couldn't anyway. Every problem found by `check`/`weekly` is posted to
-Telegram and makes the command exit 1.
+`run` never forgets, prunes or deletes data. The host's write-only S3 user
+couldn't anyway: the only deletes it may make are under `<prefix>/locks/`.
+Every problem found by `check`/`weekly` is posted to Telegram and makes the
+command exit 1.
+
+`run` does clear one thing: a stale lock. A killed run (most often CI's weekly
+prune, whose lock is exclusive) would otherwise block every nightly backup
+until the next `weekly`. When the repository probe finds the repository locked
+and some lock is at least `STALE_LOCK_AGE_SECONDS` old, `run` calls plain
+`restic unlock` (never `--remove-all`), alerts each lock removed, and probes
+again. `restic unlock` removes only locks restic proves stale: unrefreshed for
+30 minutes, or from a dead PID on the same hostname. A live process refreshes
+its lock every 5 minutes, and since restic 0.15 one that misses its refresh
+aborts instead of carrying on unlocked, so a live run's lock is never removed.
+A younger lock fails the run as before.
 
 The repository is initialised only when restic says it doesn't exist. An
 unreachable endpoint, bad credentials or a TLS error fail the run instead
@@ -47,6 +59,7 @@ rather than riding restic's ~15-minute retry loop.
 | `PROBE_TIMEOUT_SECONDS` | `120` | cap on the "does the repository exist" probe |
 | `MAX_AGE_SECONDS` | `93600` | healthcheck and daily freshness threshold (26 h) |
 | `MAX_SNAPSHOTS` | `KEEP_DAILY+KEEP_WEEKLY+KEEP_MONTHLY+8` (25) | daily: more than this means retention isn't running (the +8 covers a week of nightlies before the weekly prune) |
+| `STALE_LOCK_AGE_SECONDS` | `3600` | run: once a lock blocking the probe is this old, `restic unlock` removes the stale ones (alerting) |
 | `LOCK_MAX_AGE_SECONDS` | `86400` | daily: older locks are reported; weekly removes them (alerting) so a killed run can't block retention |
 | `KEEP_DAILY` / `KEEP_WEEKLY` / `KEEP_MONTHLY` | `7` / `4` / `6` | weekly retention |
 | `READ_SUBSET` | `250M` | weekly `restic check --read-data-subset` |
