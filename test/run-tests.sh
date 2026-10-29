@@ -383,6 +383,15 @@ elif [ "$(nlocks)" != 0 ]; then no T22c-lock-still-there
 elif snap_is "$R22" "$((n22 + 1))"; then ok T22c-stale-lock-cleared-and-backed-up
 else no "T22c-snapshots-$(snapcount "$R22")-not-$((n22 + 1))"; fi
 
+# T23: the image works as a non-root user, set up like mail-deployer (HOME and
+# the restic cache on the tmpfs). Every other test runs as root, which reads
+# through any directory mode: 0.1.7's /usr/local/lib/backup came out 0644 and
+# only a non-root sidecar crash-looped.
+R23="$REPO_BASE/t/nonroot"
+# shellcheck disable=SC2086
+if sidecar --user 2000:2000 -e DUMP_KIND=none -e HOME=/var/tmp -e TMPDIR=/var/tmp -e RESTIC_CACHE_DIR=/var/tmp/restic-cache -e RESTIC_REPOSITORY=$R23 -e RESTIC_HOST=t-user "$IMG" run >/tmp/t23.log 2>&1 \
+   && snap_is "$R23" 1; then ok T23-runs-as-non-root; else no T23-runs-as-non-root; cat /tmp/t23.log; fi
+
 # --- Task 3 appends T7-T10 above this line ---
 
 $C down -v >/dev/null 2>&1

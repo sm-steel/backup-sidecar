@@ -19,8 +19,11 @@ RUN apk add --no-cache ca-certificates curl jq tzdata \
  && curl -fsSLo rclone.zip "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
  && echo "${RCLONE_SHA256}  rclone.zip" | sha256sum -c - \
  && unzip -q rclone.zip && install -m 0755 "rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone \
- && rm -rf /tmp/*
+ && rm -rf /tmp/* \
+ && install -d -m 0755 /usr/local/lib/backup
 
+# The directory exists first: BuildKit gives a parent that COPY --chmod
+# creates the file's mode (0644, no x), which only root can traverse (T23).
 COPY --chmod=0644 lib/common.sh /usr/local/lib/backup/common.sh
 COPY --chmod=0755 bin/entrypoint.sh bin/backup.sh bin/check.sh /usr/local/bin/
 
